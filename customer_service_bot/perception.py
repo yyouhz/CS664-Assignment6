@@ -27,24 +27,52 @@ MISSING_PART_RE = re.compile(r"(hex key|allen key|screw|adapter|cable|charger|ma
 AGENT_MENTION_RE = re.compile(r"\b([A-Z][a-z]+)\b\s+(?:from|in|at)\s+support\b")
 
 def analyze_emotion(text: str) -> str:
-    """Rule-based emotion with optional VADER backstop."""
+    """
+    Rule-first emotion classifier with optional VADER refinement.
+    Design intent:
+    1. Keep decisions deterministic and cheap (no API calls).
+    2. Use VADER only as a backstop to correct obvious misses in neutral/polite/confused.
+    3. Never let the refinement downgrade an already “angry” classification.
+    Tunables (documented here for clarity, defined inline below):
+    anger_keywords / polite_keywords / confusion_keywords (extendable per domain)
+    punctuation signals: “?” → uncertainty; “!” → arousal/anger
+    VADER thresholds: compound ≤ −0.5 -> negative; ≥ +0.5 -> positive
+    """
+
+    # --- Block 1: Keyword/Punctuation Baseline (O(n) scan) ---
+    # Intended outcome:
+    #   Produce a fast, deterministic initial label from surface cues:
+    #   “confused” if uncertainty markers are present AND at least one '?'
+    #   “angry” if strong anger words OR at least one '!' (arousal proxy)
+    #   “polite” if courtesy/thanks markers appear
+    #   else “neutral”
+    # Notes:
+    #   Branch order makes “angry” outrank “polite” if both appear (safety bias).
+    #   This block is language/lexicon dependent (English focus).
     content = text.lower()
     anger_keywords = ["angry", "furious", "unacceptable", "terrible", "hate",
                       "ridiculous", "done", "fed up", "awful"]
     polite_keywords = ["please", "thank you", "thanks", "kindly"]
     confusion_keywords = ["don't understand", "confused", "explain", "what is",
-                          "why is", "how", "?"]
+                          "why is", "how", "?"]  # '?' included as a token cue
 
     if any(k in content for k in confusion_keywords) and content.count("?") >= 1:
-        emotion = "confused"
+        emotion = "confused"   # uncertainty explicit + question punctuation
     elif any(k in content for k in anger_keywords) or content.count("!") >= 1:
-        emotion = "angry"
+        emotion = "angry"      # lexical anger or high arousal
     elif any(k in content for k in polite_keywords):
-        emotion = "polite"
+        emotion = "polite"     # courtesy markers dominate in absence of anger/uncertainty
     else:
-        emotion = "neutral"
+        emotion = "neutral"    # default safe bucket
 
-    # Optional VADER refinement (best-effort, safe fallback on errors)
+    # --- Block 2: VADER Refinement (fail-safe, optional) ---
+    # Intended outcome:
+    #   Correct obvious sentiment misses when baseline is neutral/polite/confused:
+    #   If compound ≤ −0.5 -> upgrade to “angry”
+    #   If compound ≥ +0.5 AND baseline == “neutral” -> upgrade to “polite”
+    # Guarantees:
+    #   Never downgrade an “angry” baseline (preserve safety).
+    #   Always fail gracefully: if VADER or its lexicon isn’t available, skip refinement.
     try:
         import nltk
         from nltk.sentiment.vader import SentimentIntensityAnalyzer
@@ -52,16 +80,23 @@ def analyze_emotion(text: str) -> str:
             nltk.data.find('sentiment/vader_lexicon.zip')
         except LookupError:
             nltk.download('vader_lexicon', quiet=True)
+
         sid = SentimentIntensityAnalyzer()
-        c = sid.polarity_scores(text)['compound']
+        c = sid.polarity_scores(text)['compound']  # c ∈ [-1.0, +1.0]
+
         if emotion in {"neutral", "polite", "confused"}:
             if c <= -0.5:
-                emotion = "angry"
+                emotion = "angry"   # strong negative signal -> safety-upgrade
             elif c >= 0.5 and emotion == "neutral":
-                emotion = "polite"
+                emotion = "polite"  # strong positive neutral -> politeness upgrade
     except Exception:
-        pass
+        pass  # Refinement is optional; baseline remains deterministic.
 
+    # Examples (for test clarity):
+    #   - "This is unacceptable!" -> angry (exclamation + anger word)
+    #   - "I don't understand why I'm charged?" -> confused (uncertainty + '?')
+    #   - "Thanks for the quick help." -> polite (courtesy)
+    #   - "ok" -> neutral; may upgrade to polite if VADER compound ≥ 0.5
     return emotion
 
 def detect_missing_part_name(text: str) -> Optional[str]:
@@ -75,7 +110,13 @@ def detect_agent_name(text: str) -> Optional[str]:
     return m.group(1) if m else None
 
 def perceive(text: str) -> PerceptionResult:
-    """Determine intent and extract entities (actionable intents prioritized)."""
+    """
+    Outcome: Classify intent (refund_request/defect_report/billing_issue/…)
+    and extract entities (order_id/phone/amount/ticket_id/serial) to enable
+    downstream actions. No actions are executed here.
+    """
+    # intent rules … (refund/defect/billing/cancel/callback/praise/followup)
+    # entity regexes … (ORDER_RE_LIST / PHONE_RE / AMOUNT_RE / TICKET_RE / SERIAL_RE)
     content = text.lower()
     emotion = analyze_emotion(text)
 
@@ -137,3 +178,5 @@ def perceive(text: str) -> PerceptionResult:
 
     return PerceptionResult(emotion=emotion, intent=intent, entities=entities,
                             churn_risk=churn_risk, urgency=urgency)
+
+

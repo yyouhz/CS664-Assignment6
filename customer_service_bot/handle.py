@@ -102,7 +102,7 @@ def handle_complaint(user_text: str, use_gemini_polish: bool = True) -> str:
 
     # Compose response and optional polish
     reply = compose_sections(p, actions, facts)
-    print("\n".join(steps))  # debug steps for screenshots
+    # print("\n".join(steps))  # debug steps for screenshots
 
     if not use_gemini_polish:
         return reply
